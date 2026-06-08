@@ -78,6 +78,46 @@
         </template>
       </ExcelExport>
     </section>
+    <!-- ========== 示例6: 分页导出大数据 ========== -->
+    <section class="demo-section">
+      <h2>6. 分页导出 — 大批量数据</h2>
+      <p>
+        模拟 5000 条订单数据，每批 500 条分 10 批逐页获取后组装为
+        <code>.xlsx</code>
+      </p>
+
+      <div v-if="progress" class="progress-bar-wrapper">
+        <div class="progress-bar">
+          <div
+            class="progress-fill"
+            :style="{ width: (progress.fetched / progress.total * 100) + '%' }"
+          />
+        </div>
+        <span class="progress-text">
+          第 {{ progress.page }}/{{ progress.totalPages }} 页
+          · {{ progress.fetched }}/{{ progress.total }} 条
+        </span>
+      </div>
+
+      <ExcelExport
+        :columns="orderColumns"
+        :pagination="{
+          pageSize: 500,
+          fetch: mockOrderFetch,
+        }"
+        filename="大批量订单导出.xlsx"
+        :on-progress="handleProgress"
+        @before-export="beforePaginationExport"
+        @after-export="afterPaginationExport"
+        @error="(e: any) => console.error(e)"
+      >
+        <template #trigger="{ exportExcel, loading }">
+          <button :disabled="loading" class="btn primary" @click="exportExcel">
+            {{ loading ? '导出中...' : '导出 5000 条订单' }}
+          </button>
+        </template>
+      </ExcelExport>
+    </section>
   </div>
 </template>
 
@@ -211,6 +251,84 @@ const deepData = [
   { province: '浙江', city: '杭州', sales: 380000, growth: '20%' },
   { province: '浙江', city: '宁波', sales: 280000, growth: '18%' },
 ]
+
+// ── 示例6: 分页导出大数据 ──────────────────────────────
+const orderColumns: ColumnConfig[] = [
+  { title: '订单号', field: 'orderNo', width: 140 },
+  { title: '客户', field: 'customer', width: 100 },
+  { title: '产品', field: 'product', width: 120 },
+  { title: '单价', field: 'price', width: 80, style: { align: 'right' } },
+  { title: '数量', field: 'qty', width: 70, style: { align: 'right' } },
+  { title: '金额', field: 'amount', width: 100, style: { align: 'right', bold: true } },
+  { title: '省份', field: 'province', width: 80 },
+  { title: '订单日期', field: 'date', width: 120 },
+  { title: '状态', field: 'status', width: 80 },
+]
+
+const allProducts = [
+  'Widget Pro', 'Gadget Max', 'Super Tool', 'Mega Kit',
+  'Ultra Pack', 'Power Set', 'Elite Bundle', 'Basic Box',
+]
+const allStatuses = ['已发货', '已完成', '处理中', '待审核']
+const allProvinces = ['北京', '上海', '广东', '浙江', '四川', '湖北', '江苏', '重庆', '陕西']
+
+function randomItem<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)]
+}
+
+function generateOrderRows(count: number, startIdx: number): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = []
+  for (let i = 0; i < count; i++) {
+    const idx = startIdx + i
+    const price = Math.round(Math.random() * 998 + 2)
+    const qty = Math.floor(Math.random() * 50 + 1)
+    rows.push({
+      orderNo: `ORD${String(idx).padStart(8, '0')}`,
+      customer: `客户${idx}`,
+      product: randomItem(allProducts),
+      price,
+      qty,
+      amount: price * qty,
+      province: randomItem(allProvinces),
+      date: `2026-${String(Math.floor(Math.random() * 12) + 1).padStart(2, '0')}-${String(Math.floor(Math.random() * 28) + 1).padStart(2, '0')}`,
+      status: randomItem(allStatuses),
+    })
+  }
+  return rows
+}
+
+// 预生成 5000 条模拟数据，按页切分
+const TOTAL_ROWS = 5000
+const PAGE_SIZE = 500
+const allPages: Record<string, unknown>[][] = []
+for (let p = 0; p < Math.ceil(TOTAL_ROWS / PAGE_SIZE); p++) {
+  const start = p * PAGE_SIZE
+  const size = Math.min(PAGE_SIZE, TOTAL_ROWS - start)
+  allPages.push(generateOrderRows(size, start))
+}
+
+const progress = ref<{ page: number; totalPages: number; fetched: number; total: number } | null>(null)
+
+function handleProgress(p: { page: number; totalPages: number; fetched: number; total: number }) {
+  progress.value = p
+}
+
+function beforePaginationExport() {
+  progress.value = null
+}
+
+function afterPaginationExport() {
+  // 保留进度在 100% 状态 2 秒后清除
+  setTimeout(() => { progress.value = null }, 2000)
+}
+
+async function mockOrderFetch(page: number, pageSize: number): Promise<{ data: Record<string, unknown>[]; total: number }> {
+  const idx = page - 1
+  const data = idx < allPages.length ? allPages[idx] : []
+  // 模拟 200~400ms 网络延迟
+  await new Promise((r) => setTimeout(r, 200 + Math.random() * 200))
+  return { data, total: TOTAL_ROWS }
+}
 </script>
 
 <style scoped>
@@ -270,5 +388,29 @@ code {
   padding: 0.1em 0.3em;
   border-radius: 3px;
   font-size: 0.9em;
+}
+.progress-bar-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: #e9ecef;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4472C4, #70AD47);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.progress-text {
+  font-size: 0.8rem;
+  color: #666;
+  white-space: nowrap;
 }
 </style>
