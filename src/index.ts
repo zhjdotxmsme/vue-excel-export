@@ -12,10 +12,13 @@ export type {
   MergeRule,
   MergeRange,
   ExportOptions,
+  PaginationConfig,
+  PaginationResult,
+  ExportProgress,
 } from './types'
 
 // ── Engine ─────────────────────────────────────────────────────────
-export { buildWorkbook, downloadExcel, exportExcel } from './engine/builder'
+export { buildWorkbook, buildWorkbookPaginated, downloadExcel, exportExcel } from './engine/builder'
 export { parseHeaders, buildHeaderGrid } from './engine/header'
 export { calculateMerges, optimizeMerges } from './engine/merge'
 export { toHucreCellStyle, defaultHeaderStyle, defaultGroupHeaderStyle, defaultCellStyle } from './engine/styler'

@@ -15,4 +15,9 @@ export type {
   MergeRange,
 } from './style'
 
-export type { ExportOptions } from './export'
+export type {
+  ExportOptions,
+  PaginationConfig,
+  PaginationResult,
+  ExportProgress,
+} from './export'

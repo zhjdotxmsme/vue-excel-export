@@ -1,6 +1,6 @@
 import { WorkbookBuilder } from 'hucre'
 import type { CellValue, Cell, CellStyle as HucreCellStyle } from 'hucre'
-import type { ExportOptions } from '../types/export'
+import type { ExportOptions, PaginationConfig, ExportProgress } from '../types/export'
 import type { FlatColumn, HeaderInfo } from '../types/column'
 import { parseHeaders, buildHeaderGrid } from './header'
 import { calculateMerges } from './merge'
@@ -16,6 +16,10 @@ import {
  */
 export async function buildWorkbook(options: ExportOptions): Promise<Uint8Array> {
   const { columns, data, sheetName = 'Sheet1', autoColumnWidth = true } = options
+
+  if (!data) {
+    throw new Error('data is required when pagination is not used')
+  }
 
   // 1. 解析表头
   const headerInfo: HeaderInfo = parseHeaders(columns)
@@ -149,6 +153,174 @@ export async function buildWorkbook(options: ExportOptions): Promise<Uint8Array>
 }
 
 /**
+ * 分页模式构建工作簿（渐进式获取数据，逐批写入）
+ */
+export async function buildWorkbookPaginated(options: ExportOptions): Promise<Uint8Array> {
+  const { columns, pagination, sheetName = 'Sheet1', autoColumnWidth = true, onProgress } = options
+
+  if (!pagination) {
+    throw new Error('Pagination config is required')
+  }
+
+  const { pageSize = 500, fetch } = pagination
+
+  // 1. 解析表头
+  const headerInfo: HeaderInfo = parseHeaders(columns)
+  const { flatColumns, headerDepth, headerRanges } = headerInfo
+  const headerGrid = buildHeaderGrid(headerInfo)
+
+  const totalCols = flatColumns.length
+
+  // 2. 构建默认样式（复用）
+  const baseHeaderStyle = defaultHeaderStyle()
+  const baseGroupStyle = defaultGroupHeaderStyle()
+  const baseCellStyle = defaultCellStyle()
+
+  // 3. 构建 Workbook
+  let builder = WorkbookBuilder.create().addSheet(sheetName)
+
+  // 3a. 配置列
+  for (const col of flatColumns) {
+    if (autoColumnWidth) {
+      builder = builder.column({
+        header: col.title,
+        key: col.field,
+        width: col.width,
+        autoWidth: true,
+      })
+    } else {
+      builder = builder.column({
+        header: col.title,
+        key: col.field,
+        ...(col.width ? { width: col.width } : {}),
+      })
+    }
+  }
+
+  // 3b. 写入表头行
+  for (let r = 0; r < headerDepth; r++) {
+    const rowValues: CellValue[] = []
+    for (let c = 0; c < totalCols; c++) {
+      rowValues.push(headerGrid[r]?.[c] || '')
+    }
+    if (rowValues.length > 0) {
+      builder = builder.row(rowValues)
+    }
+  }
+
+  // 3c. 表头行样式
+  for (let r = 0; r < headerDepth; r++) {
+    for (let c = 0; c < totalCols; c++) {
+      const flatCol = flatColumns.find((f) => f.colIndex === c)
+      const isGroupHeader = headerRanges.some(
+        (hr) => hr.startCol <= c && hr.endCol >= c && hr.startRow === r,
+      )
+      const mergedHucreStyle = mergeStyles(
+        baseHeaderStyle,
+        isGroupHeader ? baseGroupStyle : undefined,
+        flatCol?.style ? toHucreCellStyle(flatCol.style) : undefined,
+        options.headerStyle ? toHucreCellStyle(options.headerStyle) : undefined,
+      )
+      if (mergedHucreStyle) {
+        builder = builder.cell(r, c, { style: mergedHucreStyle } as Partial<Cell>)
+      }
+    }
+  }
+
+  // 4. 分页循环：逐批获取数据并写入
+  let page = 1
+  let total = 0
+  let fetched = 0
+  let totalPages = 0
+  const allBatcMerges: ReturnType<typeof calculateMerges> = []
+
+  while (total === 0 || fetched < total) {
+    const result = await fetch(page, pageSize)
+    const batchData = result.data as Record<string, unknown>[]
+
+    if (page === 1) {
+      total = result.total
+      totalPages = Math.ceil(total / pageSize)
+    }
+
+    if (batchData.length === 0) break
+
+    const batchStartRow = headerDepth + fetched
+
+    // 4a. 写入数据行
+    for (let i = 0; i < batchData.length; i++) {
+      const rowData = batchData[i]
+      const rowValues: CellValue[] = []
+
+      for (const col of flatColumns) {
+        if (!col.field) {
+          rowValues.push(null)
+        } else {
+          const val = rowData[col.field]
+          rowValues.push(val === undefined || val === null ? null : (val as CellValue))
+        }
+      }
+
+      if (rowValues.length > 0) {
+        builder = builder.row(rowValues)
+      }
+    }
+
+    // 4b. 数据行样式
+    for (let i = 0; i < batchData.length; i++) {
+      const rowIdx = batchStartRow + i
+      for (let c = 0; c < totalCols; c++) {
+        const flatCol = flatColumns.find((f) => f.colIndex === c)
+        const mergedHucreStyle = mergeStyles(
+          baseCellStyle,
+          flatCol?.style ? toHucreCellStyle(flatCol.style) : undefined,
+          options.cellStyle ? toHucreCellStyle(options.cellStyle) : undefined,
+        )
+        if (mergedHucreStyle) {
+          builder = builder.cell(rowIdx, c, { style: mergedHucreStyle } as Partial<Cell>)
+        }
+      }
+    }
+
+    // 4c. 批内合并（仅当前批数据范围）
+    const batchMerges = calculateMerges(flatColumns, batchData, batchStartRow)
+    allBatcMerges.push(...batchMerges)
+
+    fetched += batchData.length
+
+    // 4d. 进度回调
+    if (onProgress) {
+      onProgress({
+        page,
+        totalPages,
+        fetched,
+        total,
+      } satisfies ExportProgress)
+    }
+
+    page++
+
+    // 如果返回数据少于 pageSize，说明是最后一批
+    if (batchData.length < pageSize) break
+  }
+
+  // 5. 应用表头合并
+  for (const hr of headerRanges) {
+    if (hr.endCol >= hr.startCol || hr.endRow >= hr.startRow) {
+      builder = builder.merge(hr.startRow, hr.startCol, hr.endRow, hr.endCol)
+    }
+  }
+
+  // 6. 应用数据合并（批内合并）
+  for (const dm of allBatcMerges) {
+    builder = builder.merge(dm.startRow, dm.startCol, dm.endRow, dm.endCol)
+  }
+
+  // 7. 生成
+  return await builder.build()
+}
+
+/**
  * 合并多个样式（后面的覆盖前面，undefined 忽略）
  */
 function mergeStyles(...styles: (HucreCellStyle | undefined)[]): HucreCellStyle | undefined {
@@ -202,9 +374,13 @@ export function downloadExcel(buffer: Uint8Array, filename: string = 'export.xls
 
 /**
  * 导出 Excel（build + download 一步完成）
+ * - options.data 存在 → 直接构建（当前模式）
+ * - options.pagination 存在 → 分页获取后构建
  */
 export async function exportExcel(options: ExportOptions): Promise<void> {
-  const buffer = await buildWorkbook(options)
+  const buffer = options.pagination
+    ? await buildWorkbookPaginated(options)
+    : await buildWorkbook(options)
   const filename = options.filename || 'export.xlsx'
   downloadExcel(buffer, filename)
 }
